@@ -1665,3 +1665,37 @@ setup_ref_test() {
     [[ "$output" =~ "ahead" ]] || false
     [[ "$output" =~ "2 commit" ]] || false
 }
+
+@test "remotes: dolt checkout track flag" {
+    mkdir remote
+    mkdir repo1
+
+    cd repo1
+    dolt init
+    dolt remote add origin file://../remote
+    dolt push --set-upstream origin main
+    dolt checkout -b branch1
+    dolt push --set-upstream origin branch1
+
+    cd ..
+    dolt clone file://./remote repo2
+
+    cd repo2
+    run dolt checkout -b branch1 --track origin/branch1
+    [ "$status" -eq "0" ]
+
+    dolt sql -q "CREATE TABLE test (id int primary key)"
+    dolt commit -am "create table"
+    run dolt push
+    [ "$status" -eq "0" ]
+
+    cd ../repo1
+    run dolt status
+    [[ "$output" =~ "Your branch is up to date with 'origin/branch1'" ]] || false
+    [[ "$output" =~ "nothing to commit, working tree clean" ]] || false
+
+    dolt fetch
+    run dolt status
+    [[ "$output" =~ "behind" ]] || false
+    [[ "$output" =~ "1 commit" ]] || false
+}

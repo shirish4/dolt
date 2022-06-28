@@ -16,7 +16,7 @@ package commands
 
 import (
 	"context"
-
+	"fmt"
 	"github.com/dolthub/dolt/go/cmd/dolt/cli"
 	"github.com/dolthub/dolt/go/cmd/dolt/errhand"
 	eventsapi "github.com/dolthub/dolt/go/gen/proto/dolt/services/eventsapi/v1alpha1"
@@ -24,7 +24,9 @@ import (
 	"github.com/dolthub/dolt/go/libraries/doltcore/doltdocs"
 	"github.com/dolthub/dolt/go/libraries/doltcore/env"
 	"github.com/dolthub/dolt/go/libraries/doltcore/env/actions"
+	"github.com/dolthub/dolt/go/libraries/doltcore/ref"
 	"github.com/dolthub/dolt/go/libraries/utils/argparser"
+	"strings"
 )
 
 var checkoutDocs = cli.CommandDocumentationContent{
@@ -45,6 +47,7 @@ dolt checkout {{.LessThan}}table{{.GreaterThan}}...
 		`{{.LessThan}}branch{{.GreaterThan}}`,
 		`{{.LessThan}}table{{.GreaterThan}}...`,
 		`-b {{.LessThan}}new-branch{{.GreaterThan}} [{{.LessThan}}start-point{{.GreaterThan}}]`,
+		`-b {{.LessThan}}new-branch{{.GreaterThan}} --track {{.LessThan}}remote{{.GreaterThan}}/{{.LessThan}}branch{{.GreaterThan}}`,
 	},
 }
 
@@ -80,7 +83,7 @@ func (cmd CheckoutCmd) Exec(ctx context.Context, commandStr string, args []strin
 	helpPrt, usagePrt := cli.HelpAndUsagePrinters(cli.CommandDocsForCommandString(commandStr, checkoutDocs, ap))
 	apr := cli.ParseArgsOrDie(ap, args, helpPrt)
 
-	if (apr.Contains(cli.CheckoutCoBranch) && apr.NArg() > 1) || (!apr.Contains(cli.CheckoutCoBranch) && apr.NArg() == 0) {
+	if ((apr.Contains(cli.CheckoutCoBranch) || apr.Contains(cli.TrackFlag)) && apr.NArg() > 1) || (!apr.Contains(cli.CheckoutCoBranch) && apr.NArg() == 0) {
 		usagePrt()
 		return 1
 	}
@@ -90,13 +93,8 @@ func (cmd CheckoutCmd) Exec(ctx context.Context, commandStr string, args []strin
 		return HandleVErrAndExitCode(verr, usagePrt)
 	}
 
-	if newBranch, newBranchOk := apr.GetValue(cli.CheckoutCoBranch); newBranchOk {
-		var verr errhand.VerboseError
-		if len(newBranch) == 0 {
-			verr = errhand.BuildDError("error: cannot checkout empty string").Build()
-		} else {
-			verr = checkoutNewBranch(ctx, dEnv, newBranch, apr)
-		}
+	if apr.Contains(cli.CheckoutCoBranch) || apr.Contains(cli.TrackFlag) {
+		verr := checkoutNewBranch(ctx, dEnv, apr)
 		return HandleVErrAndExitCode(verr, usagePrt)
 	}
 
@@ -172,19 +170,117 @@ func checkoutNewBranchFromStartPt(ctx context.Context, dEnv *env.DoltEnv, newBra
 	return checkoutBranch(ctx, dEnv, newBranch, false)
 }
 
-func checkoutNewBranch(ctx context.Context, dEnv *env.DoltEnv, newBranch string, apr *argparser.ArgParseResults) errhand.VerboseError {
-	startPt := "head"
+func checkoutNewBranch(ctx context.Context, dEnv *env.DoltEnv, apr *argparser.ArgParseResults) errhand.VerboseError {
+	var remote env.Remote
+	var err error
+	var newBranchName string
+	var startPt = "head"
+
 	if apr.NArg() == 1 {
 		startPt = apr.Arg(0)
 	}
 
-	err := actions.CreateBranchWithStartPt(ctx, dEnv.DbData(), newBranch, startPt, false)
+	trackVal, setTrack := apr.GetValue(cli.TrackFlag)
+	if setTrack {
+		if trackVal != "direct" && trackVal != "inherit" {
+			startPt = trackVal
+		} else if trackVal == "inherit" {
+			return errhand.VerboseErrorFromError(fmt.Errorf("--track='inherit' is not supported yet"))
+		}
+	}
 
+	if newBranch, ok := apr.GetValue(cli.CheckoutCoBranch); ok {
+		if len(newBranch) == 0 {
+			return errhand.BuildDError("error: cannot checkout empty string").Build()
+		}
+		newBranchName = newBranch
+	} else {
+		remote, newBranchName, err = getRemoteTrackingBranch(ctx, dEnv, startPt)
+		if err != nil {
+			return errhand.BuildDError(err.Error()).Build()
+		}
+	}
+
+	err = actions.CreateBranchWithStartPt(ctx, dEnv.DbData(), newBranchName, startPt, false)
 	if err != nil {
 		return errhand.BuildDError(err.Error()).Build()
 	}
 
-	return checkoutBranch(ctx, dEnv, newBranch, false)
+	verr := checkoutBranch(ctx, dEnv, newBranchName, false)
+	if verr != nil {
+		return verr
+	}
+
+	if setTrack {
+		// the new branch is checked out at this point
+		err = setRemoteTrackingForABranch(ctx, dEnv, remote, newBranchName, startPt)
+		if err != nil {
+			return errhand.BuildDError(err.Error()).Build()
+		}
+		err = dEnv.RepoState.Save(dEnv.FS)
+		if err != nil {
+			err = fmt.Errorf("%w; %s", actions.ErrFailedToSaveRepoState, err.Error())
+		}
+	}
+
+	return nil
+}
+
+func getRemoteTrackingBranch(ctx context.Context, dEnv *env.DoltEnv, startPt string) (env.Remote, string, error) {
+	remotes, err := dEnv.RepoStateReader().GetRemotes()
+	if err != nil {
+		return env.Remote{}, "", err
+	}
+
+	var remote env.Remote
+	refSpecStr := startPt
+	names := strings.Split(startPt, "/")
+	if r, remoteOK := remotes[names[0]]; remoteOK {
+		remote = r
+		refSpecStr = strings.Join(names[1:], "/")
+	} else if r, remoteOK = remotes["origin"]; remoteOK {
+		remote = r
+	} else {
+		return env.Remote{}, "", fmt.Errorf("invalid remote-tracking path")
+	}
+
+	refSpecStr, err = env.DisambiguateRefSpecStr(ctx, dEnv.DoltDB, refSpecStr)
+	if err != nil {
+		return env.Remote{}, "", err
+	}
+
+	return remote, refSpecStr, nil
+}
+
+func setRemoteTrackingForABranch(ctx context.Context, dEnv *env.DoltEnv, remote env.Remote, branchName, refSpecStr string) error {
+	refSpec, err := ref.ParseRefSpec(refSpecStr)
+	if err != nil {
+		return fmt.Errorf("%w: '%s'", err, refSpecStr)
+	}
+
+	// TODO : get ref.DoltRef for branchName
+	branch := dEnv.RepoStateReader().CWBHeadRef()
+	hasRef, err := dEnv.DoltDB.HasRef(ctx, branch)
+	if err != nil {
+		return err
+	}
+	if !hasRef {
+		return doltdb.ErrBranchNotFound
+	}
+
+	src := refSpec.SrcRef(branch)
+	dest := refSpec.DestRef(src)
+
+	if branch.GetPath() != dest.GetPath() {
+		return env.ErrBranchDoesNotMatchUpstream
+	}
+
+	return dEnv.RepoStateWriter().UpdateBranch(branch.GetPath(), env.BranchConfig{
+		Merge: ref.MarshalableRef{
+			Ref: dest,
+		},
+		Remote: remote.Name,
+	})
 }
 
 func checkoutTablesAndDocs(ctx context.Context, dEnv *env.DoltEnv, tables []string, docs doltdocs.Docs) errhand.VerboseError {

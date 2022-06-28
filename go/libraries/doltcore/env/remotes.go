@@ -35,7 +35,7 @@ import (
 
 var NoRemote = Remote{}
 
-var ErrBranchDoesNotMatchUpstream = errors.New("the upstream branch of your current branch does not match the nane if your current branch")
+var ErrBranchDoesNotMatchUpstream = errors.New("the upstream branch of your current branch does not match the name of your current branch")
 var ErrUpstreamBranchAlreadySet = errors.New("upstream branch already set")
 var ErrNoUpstreamForBranch = errors.New("the current branch has no upstream branch")
 var ErrFailedToReadDb = errors.New("failed to read from the db")
@@ -138,7 +138,7 @@ func NewPushOpts(ctx context.Context, apr *argparser.ArgParseResults, rsr RepoSt
 	if remoteOK && len(args) == 1 {
 		refSpecStr := args[0]
 
-		refSpecStr, err = disambiguateRefSpecStr(ctx, ddb, refSpecStr)
+		refSpecStr, err = DisambiguateRefSpecStr(ctx, ddb, refSpecStr)
 		if err != nil {
 			return nil, err
 		}
@@ -151,7 +151,7 @@ func NewPushOpts(ctx context.Context, apr *argparser.ArgParseResults, rsr RepoSt
 		remoteName = args[0]
 		refSpecStr := args[1]
 
-		refSpecStr, err = disambiguateRefSpecStr(ctx, ddb, refSpecStr)
+		refSpecStr, err = DisambiguateRefSpecStr(ctx, ddb, refSpecStr)
 		if err != nil {
 			return nil, err
 		}
@@ -301,9 +301,9 @@ func ParseRSFromArgs(remName string, args []string) ([]ref.RemoteRefSpec, error)
 	return refSpecs, nil
 }
 
-// if possible, convert refs to full spec names. prefer branches over tags.
+// DisambiguateRefSpecStr if possible, convert refs to full spec names. prefer branches over tags.
 // eg "main" -> "refs/heads/main", "v1" -> "refs/tags/v1"
-func disambiguateRefSpecStr(ctx context.Context, ddb *doltdb.DoltDB, refSpecStr string) (string, error) {
+func DisambiguateRefSpecStr(ctx context.Context, ddb *doltdb.DoltDB, refSpecStr string) (string, error) {
 	brachRefs, err := ddb.GetBranches(ctx)
 
 	if err != nil {
