@@ -229,7 +229,7 @@ func tableData(ctx *sql.Context, tbl *doltdb.Table, ddb *doltdb.DoltDB) (durable
 	var err error
 
 	if tbl == nil {
-		data, err = durable.NewEmptyIndex(ctx, ddb.ValueReadWriter(), schema.EmptySchema)
+		data, err = durable.NewEmptyIndex(ctx, ddb.ValueReadWriter(), ddb.NodeStore(), schema.EmptySchema)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -333,7 +333,7 @@ func (dp *DiffPartition) isDiffablePartition(ctx *sql.Context) (bool, error) {
 		return false, err
 	}
 
-	return schema.ArePrimaryKeySetsDiffable(fromSch, toSch), nil
+	return schema.ArePrimaryKeySetsDiffable(dp.from.Format(), fromSch, toSch), nil
 }
 
 type partitionSelectFunc func(*sql.Context, DiffPartition) (bool, error)

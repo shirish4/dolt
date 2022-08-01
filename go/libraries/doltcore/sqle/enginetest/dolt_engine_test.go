@@ -43,6 +43,11 @@ import (
 
 var skipPrepared bool
 
+// SkipPreparedsCount is used by the "ci-check-repo CI workflow
+// as a reminder to consider prepareds when adding a new
+// enginetest suite.
+const SkipPreparedsCount = 105
+
 const skipPreparedFlag = "DOLT_SKIP_PREPARED_ENGINETESTS"
 
 func init() {
@@ -84,30 +89,76 @@ func TestSingleScript(t *testing.T) {
 
 	var scripts = []queries.ScriptTest{
 		{
-			Name: "new table",
+			Name: "dolt_merge() works with no auto increment overlap",
 			SetUpScript: []string{
-				"create table t1 (a int primary key, b int)",
-				"insert into t1 values (1,2)",
+				"CREATE TABLE t (pk int PRIMARY KEY AUTO_INCREMENT, c0 int);",
+				"INSERT INTO t (c0) VALUES (1), (2);",
+				"CALL dolt_commit('-a', '-m', 'cm1');",
+				"CALL dolt_checkout('-b', 'test');",
+				"INSERT INTO t (c0) VALUES (3), (4);",
+				"CALL dolt_commit('-a', '-m', 'cm2');",
+				"CALL dolt_checkout('main');",
 			},
 			Assertions: []queries.ScriptTestAssertion{
 				{
-					Query:    "select to_a, to_b, from_commit, to_commit, diff_type from dolt_diff('t1', 'HEAD', 'WORKING')",
-					Expected: []sql.Row{{1, 2, "HEAD", "WORKING", "added"}},
+					Query:    "CALL dolt_merge('test');",
+					Expected: []sql.Row{{1, 0}},
 				},
 				{
-					Query:       "select to_a, from_b, from_commit, to_commit, diff_type from dolt_diff('t1', 'HEAD', 'WORKING')",
-					ExpectedErr: sql.ErrColumnNotFound,
+					Query:    "INSERT INTO t VALUES (NULL,5),(6,6),(NULL,7);",
+					Expected: []sql.Row{{sql.OkResult{RowsAffected: 3, InsertID: 5}}},
 				},
 				{
-					Query:    "select from_a, from_b, from_commit, to_commit, diff_type from dolt_diff('t1', 'WORKING', 'HEAD')",
-					Expected: []sql.Row{{1, 2, "WORKING", "HEAD", "removed"}},
+					Query: "SELECT * FROM t ORDER BY pk;",
+					Expected: []sql.Row{
+						{1, 1},
+						{2, 2},
+						{3, 3},
+						{4, 4},
+						{5, 5},
+						{6, 6},
+						{7, 7},
+					},
 				},
 			},
 		},
+		//{
+		//	Name: "dolt_merge() with a gap in an auto increment key",
+		//	SetUpScript: []string{
+		//		"CREATE TABLE t2 (pk int PRIMARY KEY AUTO_INCREMENT, c0 int);",
+		//		"INSERT INTO t2 (c0) VALUES (1), (2);",
+		//		"CALL dolt_add('-A');",
+		//		"CALL dolt_commit('-am', 'cm1');",
+		//		"CALL dolt_checkout('-b', 'test2');",
+		//		"INSERT INTO t2 VALUES (4,4), (5,5);",
+		//		"CALL dolt_commit('-am', 'cm2');",
+		//		"CALL dolt_checkout('main');",
+		//	},
+		//	Assertions: []queries.ScriptTestAssertion{
+		//		{
+		//			Query:    "CALL dolt_merge('test2');",
+		//			Expected: []sql.Row{{1, 0}},
+		//		},
+		//		{
+		//			Query:    "INSERT INTO t2 VALUES (3,3),(NULL,6);",
+		//			Expected: []sql.Row{{sql.OkResult{RowsAffected: 2, InsertID: 3}}},
+		//		},
+		//		{
+		//			Query: "SELECT * FROM t2 ORDER BY pk;",
+		//			Expected: []sql.Row{
+		//				{1, 1},
+		//				{2, 2},
+		//				{3, 3},
+		//				{4, 4},
+		//				{5, 5},
+		//				{6, 6},
+		//			},
+		//		},
+		//	},
+		//},
 	}
 
 	harness := newDoltHarness(t)
-	harness.Setup(setup.MydbData)
 	for _, test := range scripts {
 		enginetest.TestScript(t, harness, test)
 	}
@@ -183,7 +234,7 @@ func TestSingleScriptPrepared(t *testing.T) {
 	//sch3, rows3 := enginetest.MustQuery(ctx, e, rawQuery)
 	//fmt.Println(sch3, rows3)
 
-	enginetest.TestQueryWithContext(t, ctx, e, tt.Query, tt.Expected, tt.ExpectedColumns, tt.Bindings)
+	enginetest.TestQueryWithContext(t, ctx, e, harness, tt.Query, tt.Expected, tt.ExpectedColumns, tt.Bindings)
 }
 
 func TestVersionedQueries(t *testing.T) {
@@ -207,15 +258,7 @@ func TestQueryPlans(t *testing.T) {
 	// Parallelism introduces Exchange nodes into the query plans, so disable.
 	// TODO: exchange nodes should really only be part of the explain plan under certain debug settings
 	harness := newDoltHarness(t).WithParallelism(1).WithSkippedQueries(skipped)
-
-	var plans []queries.QueryPlanTest
-	if types.IsFormat_DOLT_1(types.Format_Default) {
-		plans = NewFormatQueryPlanTests
-	} else {
-		plans = queries.PlanTests
-	}
-
-	enginetest.TestQueryPlans(t, harness, plans)
+	enginetest.TestQueryPlans(t, harness, queries.PlanTests)
 }
 
 func TestDoltDiffQueryPlans(t *testing.T) {
@@ -225,14 +268,7 @@ func TestDoltDiffQueryPlans(t *testing.T) {
 	require.NoError(t, err)
 	defer e.Close()
 
-	var planTests []queries.QueryPlanTest
-	if types.IsFormat_DOLT_1(types.Format_Default) {
-		planTests = DoltDiffPlanNewFormatTests
-	} else {
-		planTests = DoltDiffPlanTests
-	}
-
-	for _, tt := range planTests {
+	for _, tt := range DoltDiffPlanTests {
 		enginetest.TestQueryPlan(t, harness, e, tt.Query, tt.ExpectedPlan)
 	}
 }
@@ -263,6 +299,15 @@ func TestInsertInto(t *testing.T) {
 
 func TestInsertIgnoreInto(t *testing.T) {
 	enginetest.TestInsertIgnoreInto(t, newDoltHarness(t))
+}
+
+// todo: merge this into the above test when https://github.com/dolthub/dolt/issues/3836 is fixed
+func TestInsertIgnoreIntoWithDuplicateUniqueKeyKeyless(t *testing.T) {
+	if !types.IsFormat_DOLT_1(types.Format_Default) {
+		// todo: fix https://github.com/dolthub/dolt/issues/3836
+		t.Skip()
+	}
+	enginetest.TestInsertIgnoreIntoWithDuplicateUniqueKeyKeyless(t, newDoltHarness(t))
 }
 
 func TestInsertIntoErrors(t *testing.T) {
@@ -373,7 +418,7 @@ func TestDoltUserPrivileges(t *testing.T) {
 					})
 				} else {
 					t.Run(assertion.Query, func(t *testing.T) {
-						enginetest.TestQueryWithContext(t, ctx, engine, assertion.Query, assertion.Expected, nil, nil)
+						enginetest.TestQueryWithContext(t, ctx, engine, harness, assertion.Query, assertion.Expected, nil, nil)
 					})
 				}
 			}
@@ -619,6 +664,14 @@ func TestStoredProcedures(t *testing.T) {
 	enginetest.TestStoredProcedures(t, newDoltHarness(t))
 }
 
+func TestLargeJsonObjects(t *testing.T) {
+	sqle.SkipByDefaultInCI(t)
+	harness := newDoltHarness(t)
+	for _, script := range LargeJsonObjectScriptTests {
+		enginetest.TestScript(t, harness, script)
+	}
+}
+
 func TestTransactions(t *testing.T) {
 	for _, script := range queries.TransactionTests {
 		enginetest.TestTransactionScript(t, newDoltHarness(t), script)
@@ -690,6 +743,28 @@ func TestDoltMerge(t *testing.T) {
 		// dolt versioning conflicts with reset harness -- use new harness every time
 		enginetest.TestScript(t, newDoltHarness(t), script)
 	}
+
+	if types.IsFormat_DOLT_1(types.Format_Default) {
+		for _, script := range Dolt1MergeScripts {
+			enginetest.TestScript(t, newDoltHarness(t), script)
+		}
+	}
+}
+
+func TestDoltConflictsTableNameTable(t *testing.T) {
+	for _, script := range DoltConflictTableNameTableTests {
+		enginetest.TestScript(t, newDoltHarness(t), script)
+	}
+}
+
+// tests new format behavior for keyless merges that create CVs and conflicts
+func TestKeylessDoltMergeCVsAndConflicts(t *testing.T) {
+	if !types.IsFormat_DOLT_1(types.Format_Default) {
+		t.Skip()
+	}
+	for _, script := range KeylessMergeCVsAndConflictsScripts {
+		enginetest.TestScript(t, newDoltHarness(t), script)
+	}
 }
 
 // eventually this will be part of TestDoltMerge
@@ -722,6 +797,18 @@ func TestDoltReset(t *testing.T) {
 
 func TestDoltBranch(t *testing.T) {
 	for _, script := range DoltBranchScripts {
+		enginetest.TestScript(t, newDoltHarness(t), script)
+	}
+}
+
+func TestDoltTag(t *testing.T) {
+	for _, script := range DoltTagTestScripts {
+		enginetest.TestScript(t, newDoltHarness(t), script)
+	}
+}
+
+func TestDoltRemote(t *testing.T) {
+	for _, script := range DoltRemoteTestScripts {
 		enginetest.TestScript(t, newDoltHarness(t), script)
 	}
 }
@@ -879,6 +966,12 @@ func TestDiffSystemTable(t *testing.T) {
 			enginetest.TestScript(t, harness, test)
 		})
 	}
+
+	if types.IsFormat_DOLT_1(types.Format_Default) {
+		for _, test := range Dolt1DiffSystemTableScripts {
+			enginetest.TestScript(t, newDoltHarness(t), test)
+		}
+	}
 }
 
 func TestTestReadOnlyDatabases(t *testing.T) {
@@ -900,18 +993,13 @@ func TestPersist(t *testing.T) {
 	require.True(t, ok)
 	globals := config.NewPrefixConfig(localConf, env.SqlServerGlobalsPrefix)
 	newPersistableSession := func(ctx *sql.Context) sql.PersistableSession {
-		session := ctx.Session.(*dsess.DoltSession).Session.NewDoltSession(globals)
+		session := ctx.Session.(*dsess.DoltSession).WithGlobals(globals)
 		err := session.RemoveAllPersistedGlobals()
 		require.NoError(t, err)
 		return session
 	}
 
 	enginetest.TestPersist(t, harness, newPersistableSession)
-}
-
-func TestKeylessUniqueIndex(t *testing.T) {
-	harness := newDoltHarness(t)
-	enginetest.TestKeylessUniqueIndex(t, harness)
 }
 
 func TestTypesOverWire(t *testing.T) {

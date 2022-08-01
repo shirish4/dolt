@@ -67,7 +67,7 @@ func TestRoundTripNodeItems(t *testing.T) {
 
 func TestNodeSize(t *testing.T) {
 	sz := unsafe.Sizeof(Node{})
-	assert.Equal(t, 128, int(sz))
+	assert.Equal(t, 152, int(sz))
 }
 
 func TestNodeHashValueCompatibility(t *testing.T) {
@@ -104,7 +104,7 @@ func TestNodeDecodeValueCompatibility(t *testing.T) {
 
 	v, err := vs.ReadValue(context.Background(), h)
 	require.NoError(t, err)
-	assert.Equal(t, nd.bytes(), []byte(v.(types.TupleRowStorage)))
+	assert.Equal(t, nd.bytes(), []byte(v.(types.SerialMessage)))
 }
 
 func randomNodeItemPairs(t *testing.T, count int) (keys, values []Item) {
