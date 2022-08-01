@@ -5,8 +5,10 @@ version: "1.2.0"
 preRun:
   # SECONDLY - You need to set the preRun commands. These are shell commands executed inside the root level of your git repository before running the tests. preRun commands are executed using non-login shells by default, so you must explicitly source any dotfiles as part of the command.
   command:
+    - "cd go"
     - "go get -d ./..."
     - "go mod vendor"
+  
 
 postMerge:
   # THIRDLY - You need to set postMerge patterns.
